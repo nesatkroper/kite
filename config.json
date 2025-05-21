@@ -1,0 +1,7 @@
+{
+  "host": "localhost",
+  "port": "4141",
+  "username": "kite",
+  "password": "kite",
+  "schema_name": "public"
+}
