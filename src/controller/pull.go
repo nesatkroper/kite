@@ -9,7 +9,7 @@ import (
 	"kite/src/helper"
 )
 
-func ReadCollection(collectionName, schemaName string) error {
+func PullCollection(collectionName, schemaName string) error {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
 		dir = filepath.Join("..", "db", schemaName)

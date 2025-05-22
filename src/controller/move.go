@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 )
 
-func RemoveRecord(collectionName, id, schemaName string) error {
+func MoveRecord(collectionName, id, schemaName string) error {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
 		dir = filepath.Join("..", "db", schemaName)

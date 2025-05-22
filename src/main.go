@@ -309,7 +309,7 @@ func runServer() {
 			collectionName := c.Param("collection_name")
 			id := c.Param("id")
 
-			if err := controller.RemoveRecord(collectionName, id, schemaName); err != nil {
+			if err := controller.MoveRecord(collectionName, id, schemaName); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
@@ -505,7 +505,7 @@ func runServer() {
 			return
 		}
 
-		if err := controller.RemoveRecord(collectionName, id, schemaName); err != nil {
+		if err := controller.MoveRecord(collectionName, id, schemaName); err != nil {
 			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
 				"Error":          err.Error(),
 				"SchemaName":     schemaName,
@@ -668,7 +668,7 @@ func main() {
 			schemaName = args[1]
 		}
 
-		if err := controller.ReadCollection(collectionName, schemaName); err != nil {
+		if err := controller.PullCollection(collectionName, schemaName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -709,7 +709,7 @@ func main() {
 			schemaName = args[2]
 		}
 
-		if err := controller.RemoveRecord(collectionName, id, schemaName); err != nil {
+		if err := controller.MoveRecord(collectionName, id, schemaName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
