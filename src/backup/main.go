@@ -1,7 +1,12 @@
+
 package main
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,18 +16,27 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"kite/src/types"
-	"kite/src/helper"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
+// DBConfig holds connection details
+type DBConfig struct {
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	Host       string `json:"host"`
+	Port       string `json:"port"`
+	SchemaName string `json:"schema_name"`
+}
+
+// Record represents the JSON structure
 type Record map[string]interface{}
 
-func loadConfig() (types.DBConfig, error) {
+// loadConfig reads config.json or creates default
+func loadConfig() (DBConfig, error) {
 	configPath := filepath.Join("..", "config.json")
-	defaultConfig := types.DBConfig{
+	defaultConfig := DBConfig{
 		Username:   "kite",
 		Password:   "kite",
 		Host:       "localhost",
@@ -34,25 +48,87 @@ func loadConfig() (types.DBConfig, error) {
 	if os.IsNotExist(err) {
 		data, err := json.MarshalIndent(defaultConfig, "", "  ")
 		if err != nil {
-			return types.DBConfig{}, fmt.Errorf("failed to marshal default config: %v", err)
+			return DBConfig{}, fmt.Errorf("failed to marshal default config: %v", err)
 		}
 		if err := os.WriteFile(configPath, data, 0600); err != nil {
-			return types.DBConfig{}, fmt.Errorf("failed to write default config: %v", err)
+			return DBConfig{}, fmt.Errorf("failed to write default config: %v", err)
 		}
 		return defaultConfig, nil
 	}
 	if err != nil {
-		return types.DBConfig{}, fmt.Errorf("failed to read config: %v", err)
+		return DBConfig{}, fmt.Errorf("failed to read config: %v", err)
 	}
 
-	var config types.DBConfig
+	var config DBConfig
 	if err := json.Unmarshal(data, &config); err != nil {
-		return types.DBConfig{}, fmt.Errorf("failed to parse config: %v", err)
+		return DBConfig{}, fmt.Errorf("failed to parse config: %v", err)
 	}
 	return config, nil
 }
 
-func validateConnection(config types.DBConfig) error {
+// generateKey creates a 32-byte key for AES-256
+func generateKey() ([]byte, error) {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// encrypt encrypts data using AES-GCM
+func encrypt(data, key []byte) (string, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, data, nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decrypt decrypts base64-encoded ciphertext
+func decrypt(encryptedData string, key []byte) ([]byte, error) {
+	data, err := base64.StdEncoding.DecodeString(encryptedData)
+	if err != nil {
+		return nil, err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, err
+	}
+	return plaintext, nil
+}
+
+// validateConnection checks DBConfig credentials
+func validateConnection(config DBConfig) error {
 	if config.Username == "" || config.Password == "" {
 		return fmt.Errorf("username and password are required")
 	}
@@ -68,6 +144,7 @@ func validateConnection(config types.DBConfig) error {
 	return nil
 }
 
+// ensureSchema creates schema directory
 func ensureSchema(schemaName string) error {
 	dir := filepath.Join("..", "db", schemaName)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -79,6 +156,7 @@ func ensureSchema(schemaName string) error {
 	return nil
 }
 
+// addCollection creates a collection
 func addCollection(collectionName, schemaName, jsonData string) error {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
@@ -97,7 +175,7 @@ func addCollection(collectionName, schemaName, jsonData string) error {
 		return fmt.Errorf("collection %s already exists in %s", collectionName, dir)
 	}
 
-	key, err := helper.GenerateKey()
+	key, err := generateKey()
 	if err != nil {
 		return fmt.Errorf("failed to generate key: %v", err)
 	}
@@ -133,7 +211,7 @@ func addCollection(collectionName, schemaName, jsonData string) error {
 		}
 	}
 
-	encrypted, err := helper.Encrypt(dataToEncrypt, key)
+	encrypted, err := encrypt(dataToEncrypt, key)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt data: %v", err)
 	}
@@ -151,6 +229,7 @@ func addCollection(collectionName, schemaName, jsonData string) error {
 	return nil
 }
 
+// insertRecord adds a record
 func insertRecord(collectionName, jsonData, schemaName string) error {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
@@ -181,7 +260,7 @@ func insertRecord(collectionName, jsonData, schemaName string) error {
 		return fmt.Errorf("failed to read key file: %v", err)
 	}
 
-	decrypted, err := helper.Decrypt(string(encryptedData), key)
+	decrypted, err := decrypt(string(encryptedData), key)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt data: %v", err)
 	}
@@ -217,7 +296,7 @@ func insertRecord(collectionName, jsonData, schemaName string) error {
 		return fmt.Errorf("failed to marshal JSON data: %v", err)
 	}
 
-	encrypted, err := helper.Encrypt(dataToEncrypt, key)
+	encrypted, err := encrypt(dataToEncrypt, key)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt data: %v", err)
 	}
@@ -230,6 +309,7 @@ func insertRecord(collectionName, jsonData, schemaName string) error {
 	return nil
 }
 
+// readCollection reads for CLI
 func readCollection(collectionName, schemaName string) error {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
@@ -249,7 +329,7 @@ func readCollection(collectionName, schemaName string) error {
 		return fmt.Errorf("failed to read key file: %v", err)
 	}
 
-	decrypted, err := helper.Decrypt(string(encryptedData), key)
+	decrypted, err := decrypt(string(encryptedData), key)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt data: %v", err)
 	}
@@ -263,6 +343,7 @@ func readCollection(collectionName, schemaName string) error {
 	return nil
 }
 
+// readCollectionAPI reads for API and web
 func readCollectionAPI(collectionName, schemaName string) ([]Record, error) {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
@@ -282,7 +363,7 @@ func readCollectionAPI(collectionName, schemaName string) ([]Record, error) {
 		return nil, fmt.Errorf("failed to read key file: %v", err)
 	}
 
-	decrypted, err := helper.Decrypt(string(encryptedData), key)
+	decrypted, err := decrypt(string(encryptedData), key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt data: %v", err)
 	}
@@ -295,6 +376,7 @@ func readCollectionAPI(collectionName, schemaName string) ([]Record, error) {
 	return records, nil
 }
 
+// editCollection updates a record
 func editCollection(collectionName, id, jsonData, schemaName string) error {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
@@ -314,7 +396,7 @@ func editCollection(collectionName, id, jsonData, schemaName string) error {
 		return fmt.Errorf("failed to read key file: %v", err)
 	}
 
-	decrypted, err := helper.Decrypt(string(encryptedData), key)
+	decrypted, err := decrypt(string(encryptedData), key)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt data: %v", err)
 	}
@@ -361,7 +443,7 @@ func editCollection(collectionName, id, jsonData, schemaName string) error {
 		return fmt.Errorf("failed to marshal JSON data: %v", err)
 	}
 
-	encrypted, err := helper.Encrypt(dataToEncrypt, key)
+	encrypted, err := encrypt(dataToEncrypt, key)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt data: %v", err)
 	}
@@ -374,6 +456,7 @@ func editCollection(collectionName, id, jsonData, schemaName string) error {
 	return nil
 }
 
+// removeRecord removes a record
 func removeRecord(collectionName, id, schemaName string) error {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
@@ -393,7 +476,7 @@ func removeRecord(collectionName, id, schemaName string) error {
 		return fmt.Errorf("failed to read key file: %v", err)
 	}
 
-	decrypted, err := helper.Decrypt(string(encryptedData), key)
+	decrypted, err := decrypt(string(encryptedData), key)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt data: %v", err)
 	}
@@ -422,7 +505,7 @@ func removeRecord(collectionName, id, schemaName string) error {
 		return fmt.Errorf("failed to marshal JSON data: %v", err)
 	}
 
-	encrypted, err := helper.Encrypt(dataToEncrypt, key)
+	encrypted, err := encrypt(dataToEncrypt, key)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt data: %v", err)
 	}
@@ -435,6 +518,7 @@ func removeRecord(collectionName, id, schemaName string) error {
 	return nil
 }
 
+// dropCollection deletes a collection
 func dropCollection(collectionName, schemaName string) error {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
@@ -460,6 +544,7 @@ func dropCollection(collectionName, schemaName string) error {
 	return nil
 }
 
+// listCollections returns collections in a schema
 func listCollections(schemaName string) ([]string, error) {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
@@ -480,8 +565,13 @@ func listCollections(schemaName string) ([]string, error) {
 	return collections, nil
 }
 
+// runServer starts the Gin server
 func runServer() {
+	wd, _ := os.Getwd()
+	fmt.Printf("Current working directory: %s\n", wd)
+	fmt.Printf("Templates directory: %s\n", filepath.Join(wd, "templates"))
 	config, err := loadConfig()
+
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
@@ -489,14 +579,32 @@ func runServer() {
 
 	r := gin.Default()
 
+	// Serve static files
 	r.Static("/static", "./static")
 
+	// Load HTML templates
+	// _, err = os.Stat("templates")
+	// if os.IsNotExist(err) {
+	// 	fmt.Fprintf(os.Stderr, "Error: templates directory not found in %s\n", filepath.Join(".", "templates"))
+	// 	os.Exit(1)
+	// }
+	// tmpl, err := template.ParseFS(os.DirFS("templates"), "templates/*.html")
+
+	// if err != nil {
+	// 	fmt.Fprintf(os.Stderr, "Error loading templates: %v\n", err)
+	// 	os.Exit(1)
+	// }
+	// r.SetHTMLTemplate(tmpl)
+
+	// Load HTML templates
 	templatesDir := filepath.Join(".", "templates")
 	_, err = os.Stat(templatesDir)
 	if os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: templates directory not found in %s\n", templatesDir)
 		os.Exit(1)
 	}
+
+	// Use explicit file paths instead of ParseFS
 	tmpl := template.New("").Funcs(template.FuncMap{})
 	tmpl, err = tmpl.ParseFiles(
 		filepath.Join(templatesDir, "index.html"),
@@ -508,157 +616,153 @@ func runServer() {
 	}
 	r.SetHTMLTemplate(tmpl)
 
-	// API routes group
-	api := r.Group("/v1")
-	{
-		// API: Connect
-		api.POST("/connect", func(c *gin.Context) {
-			var reqConfig types.DBConfig
-			if err := c.ShouldBindJSON(&reqConfig); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-				return
-			}
+	// API: Connect
+	r.POST("/connect", func(c *gin.Context) {
+		var reqConfig DBConfig
+		if err := c.ShouldBindJSON(&reqConfig); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
 
-			if err := validateConnection(reqConfig); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
+		if err := validateConnection(reqConfig); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-			if err := ensureSchema(reqConfig.SchemaName); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
+		if err := ensureSchema(reqConfig.SchemaName); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 
-			c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Connected to schema %s", reqConfig.SchemaName)})
-		})
+		c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Connected to schema %s", reqConfig.SchemaName)})
+	})
 
-		// API middleware for other routes
-		api.Use(func(c *gin.Context) {
-			var reqConfig types.DBConfig
-			if err := c.ShouldBindJSON(&reqConfig); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid connection details in body"})
-				c.Abort()
-				return
-			}
+	// API middleware
+	r.Use(func(c *gin.Context) {
+		var reqConfig DBConfig
+		if err := c.ShouldBindJSON(&reqConfig); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid connection details in body"})
+			c.Abort()
+			return
+		}
 
-			if err := validateConnection(reqConfig); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				c.Abort()
-				return
-			}
+		if err := validateConnection(reqConfig); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.Abort()
+			return
+		}
 
-			if err := ensureSchema(reqConfig.SchemaName); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				c.Abort()
-				return
-			}
+		if err := ensureSchema(reqConfig.SchemaName); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			c.Abort()
+			return
+		}
 
-			c.Set("schema_name", reqConfig.SchemaName)
-			c.Next()
-		})
+		c.Set("schema_name", reqConfig.SchemaName)
+		c.Next()
+	})
 
-		// API: Create collection
-		api.POST("/:schema_name/:collection_name/create", func(c *gin.Context) {
-			schemaName := c.Param("schema_name")
-			collectionName := c.Param("collection_name")
-			var body struct {
-				Data string `json:"data"`
-			}
-			if err := c.ShouldBindJSON(&body); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-				return
-			}
+	// API: Create collection
+	r.POST("/:schema_name/:collection_name/create", func(c *gin.Context) {
+		schemaName := c.Param("schema_name")
+		collectionName := c.Param("collection_name")
+		var body struct {
+			Data string `json:"data"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
 
-			if err := addCollection(collectionName, schemaName, body.Data); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
+		if err := addCollection(collectionName, schemaName, body.Data); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-			c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Collection %s created", collectionName)})
-		})
+		c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Collection %s created", collectionName)})
+	})
 
-		// API: Insert record
-		api.POST("/:schema_name/:collection_name", func(c *gin.Context) {
-			schemaName := c.Param("schema_name")
-			collectionName := c.Param("collection_name")
-			var body struct {
-				Data string `json:"data"`
-			}
-			if err := c.ShouldBindJSON(&body); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-				return
-			}
+	// API: Insert record
+	r.POST("/:schema_name/:collection_name", func(c *gin.Context) {
+		schemaName := c.Param("schema_name")
+		collectionName := c.Param("collection_name")
+		var body struct {
+			Data string `json:"data"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
 
-			if err := insertRecord(collectionName, body.Data, schemaName); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
+		if err := insertRecord(collectionName, body.Data, schemaName); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-			c.JSON(http.StatusOK, gin.H{"message": "Record inserted"})
-		})
+		c.JSON(http.StatusOK, gin.H{"message": "Record inserted"})
+	})
 
-		// API: Read collection
-		api.GET("/:schema_name/:collection_name", func(c *gin.Context) {
-			schemaName := c.Param("schema_name")
-			collectionName := c.Param("collection_name")
+	// API: Read collection
+	r.GET("/:schema_name/:collection_name", func(c *gin.Context) {
+		schemaName := c.Param("schema_name")
+		collectionName := c.Param("collection_name")
 
-			records, err := readCollectionAPI(collectionName, schemaName)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
+		records, err := readCollectionAPI(collectionName, schemaName)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-			c.JSON(http.StatusOK, records)
-		})
+		c.JSON(http.StatusOK, records)
+	})
 
-		// API: Update record
-		api.PUT("/:schema_name/:collection_name/:id", func(c *gin.Context) {
-			schemaName := c.Param("schema_name")
-			collectionName := c.Param("collection_name")
-			id := c.Param("id")
-			var body struct {
-				Data string `json:"data"`
-			}
-			if err := c.ShouldBindJSON(&body); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-				return
-			}
+	// API: Update record
+	r.PUT("/:schema_name/:collection_name/:id", func(c *gin.Context) {
+		schemaName := c.Param("schema_name")
+		collectionName := c.Param("collection_name")
+		id := c.Param("id")
+		var body struct {
+			Data string `json:"data"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
 
-			if err := editCollection(collectionName, id, body.Data, schemaName); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
+		if err := editCollection(collectionName, id, body.Data, schemaName); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-			c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Record %s updated", id)})
-		})
+		c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Record %s updated", id)})
+	})
 
-		// API: Delete record
-		api.DELETE("/:schema_name/:collection_name/:id", func(c *gin.Context) {
-			schemaName := c.Param("schema_name")
-			collectionName := c.Param("collection_name")
-			id := c.Param("id")
+	// API: Delete record
+	r.DELETE("/:schema_name/:collection_name/:id", func(c *gin.Context) {
+		schemaName := c.Param("schema_name")
+		collectionName := c.Param("collection_name")
+		id := c.Param("id")
 
-			if err := removeRecord(collectionName, id, schemaName); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
+		if err := removeRecord(collectionName, id, schemaName); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-			c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Record %s deleted", id)})
-		})
+		c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Record %s deleted", id)})
+	})
 
-		// API: Drop collection
-		api.DELETE("/:schema_name/:collection_name", func(c *gin.Context) {
-			schemaName := c.Param("schema_name")
-			collectionName := c.Param("collection_name")
+	// API: Drop collection
+	r.DELETE("/:schema_name/:collection_name", func(c *gin.Context) {
+		schemaName := c.Param("schema_name")
+		collectionName := c.Param("collection_name")
 
-			if err := dropCollection(collectionName, schemaName); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
+		if err := dropCollection(collectionName, schemaName); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-			c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Collection %s dropped", collectionName)})
-		})
-	}
+		c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Collection %s dropped", collectionName)})
+	})
 
 	// Web: Home page (list collections)
 	r.GET("/", func(c *gin.Context) {
@@ -693,210 +797,6 @@ func runServer() {
 			"SchemaName":     schemaName,
 			"CollectionName": collectionName,
 			"Records":        records,
-		})
-	})
-
-	// Web: Create collection
-	r.POST("/web/create", func(c *gin.Context) {
-		collectionName := c.PostForm("collection_name")
-		data := c.PostForm("data")
-		schemaName := config.SchemaName // Default to config schema
-
-		if collectionName == "" {
-			c.HTML(http.StatusBadRequest, "index.html", gin.H{
-				"Error":      "Collection name is required",
-				"SchemaName": schemaName,
-			})
-			return
-		}
-
-		if err := addCollection(collectionName, schemaName, data); err != nil {
-			c.HTML(http.StatusBadRequest, "index.html", gin.H{
-				"Error":      err.Error(),
-				"SchemaName": schemaName,
-			})
-			return
-		}
-
-		collections, err := listCollections(schemaName)
-		if err != nil {
-			c.HTML(http.StatusInternalServerError, "index.html", gin.H{
-				"Error":      err.Error(),
-				"SchemaName": schemaName,
-			})
-			return
-		}
-
-		c.HTML(http.StatusOK, "index.html", gin.H{
-			"SchemaName":  schemaName,
-			"Collections": collections,
-			"Message":     fmt.Sprintf("Collection %s created", collectionName),
-		})
-	})
-
-	// Web: Insert record
-	r.POST("/web/insert", func(c *gin.Context) {
-		collectionName := c.PostForm("collection_name")
-		data := c.PostForm("data")
-		schemaName := c.PostForm("schema_name")
-
-		if collectionName == "" || data == "" || schemaName == "" {
-			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
-				"Error":          "Collection name, schema name, and data are required",
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		if err := insertRecord(collectionName, data, schemaName); err != nil {
-			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
-				"Error":          err.Error(),
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		records, err := readCollectionAPI(collectionName, schemaName)
-		if err != nil {
-			c.HTML(http.StatusInternalServerError, "collection.html", gin.H{
-				"Error":          err.Error(),
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		c.HTML(http.StatusOK, "collection.html", gin.H{
-			"SchemaName":     schemaName,
-			"CollectionName": collectionName,
-			"Records":        records,
-			"Message":        "Record inserted",
-		})
-	})
-
-	// Web: Edit record
-	r.POST("/web/edit", func(c *gin.Context) {
-		collectionName := c.PostForm("collection_name")
-		schemaName := c.PostForm("schema_name")
-		id := c.PostForm("id")
-		data := c.PostForm("data")
-
-		if collectionName == "" || schemaName == "" || id == "" || data == "" {
-			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
-				"Error":          "Collection name, schema name, ID, and data are required",
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		if err := editCollection(collectionName, id, data, schemaName); err != nil {
-			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
-				"Error":          err.Error(),
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		records, err := readCollectionAPI(collectionName, schemaName)
-		if err != nil {
-			c.HTML(http.StatusInternalServerError, "collection.html", gin.H{
-				"Error":          err.Error(),
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		c.HTML(http.StatusOK, "collection.html", gin.H{
-			"SchemaName":     schemaName,
-			"CollectionName": collectionName,
-			"Records":        records,
-			"Message":        fmt.Sprintf("Record %s updated", id),
-		})
-	})
-
-	// Web: Delete record
-	r.POST("/web/delete", func(c *gin.Context) {
-		collectionName := c.PostForm("collection_name")
-		schemaName := c.PostForm("schema_name")
-		id := c.PostForm("id")
-
-		if collectionName == "" || schemaName == "" || id == "" {
-			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
-				"Error":          "Collection name, schema name, and ID are required",
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		if err := removeRecord(collectionName, id, schemaName); err != nil {
-			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
-				"Error":          err.Error(),
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		records, err := readCollectionAPI(collectionName, schemaName)
-		if err != nil {
-			c.HTML(http.StatusInternalServerError, "collection.html", gin.H{
-				"Error":          err.Error(),
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		c.HTML(http.StatusOK, "collection.html", gin.H{
-			"SchemaName":     schemaName,
-			"CollectionName": collectionName,
-			"Records":        records,
-			"Message":        fmt.Sprintf("Record %s deleted", id),
-		})
-	})
-
-	// Web: Drop collection
-	r.POST("/web/drop", func(c *gin.Context) {
-		collectionName := c.PostForm("collection_name")
-		schemaName := c.PostForm("schema_name")
-
-		if collectionName == "" || schemaName == "" {
-			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
-				"Error":          "Collection name and schema name are required",
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		if err := dropCollection(collectionName, schemaName); err != nil {
-			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
-				"Error":          err.Error(),
-				"SchemaName":     schemaName,
-				"CollectionName": collectionName,
-			})
-			return
-		}
-
-		collections, err := listCollections(schemaName)
-		if err != nil {
-			c.HTML(http.StatusInternalServerError, "index.html", gin.H{
-				"Error":      err.Error(),
-				"SchemaName": schemaName,
-			})
-			return
-		}
-
-		c.HTML(http.StatusOK, "index.html", gin.H{
-			"SchemaName":  schemaName,
-			"Collections": collections,
-			"Message":     fmt.Sprintf("Collection %s dropped", collectionName),
 		})
 	})
 
