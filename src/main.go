@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,16 +8,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 	"kite/src/types"
 	"kite/src/helper"
+	"kite/src/controller"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
-
-type Record map[string]interface{}
 
 func loadConfig() (types.DBConfig, error) {
 	configPath := filepath.Join("..", "config.json")
@@ -79,191 +74,7 @@ func ensureSchema(schemaName string) error {
 	return nil
 }
 
-func addCollection(collectionName, schemaName, jsonData string) error {
-	dir := filepath.Join("..", "db")
-	if schemaName != "" {
-		dir = filepath.Join("..", "db", schemaName)
-	}
-
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("failed to create directory %s: %v", dir, err)
-	}
-	if err := os.Chmod(dir, 0700); err != nil {
-		return fmt.Errorf("failed to set permissions on %s: %v", dir, err)
-	}
-
-	collectionPath := filepath.Join(dir, collectionName+".txt")
-	if _, err := os.Stat(collectionPath); err == nil {
-		return fmt.Errorf("collection %s already exists in %s", collectionName, dir)
-	}
-
-	key, err := helper.GenerateKey()
-	if err != nil {
-		return fmt.Errorf("failed to generate key: %v", err)
-	}
-
-	var dataToEncrypt []byte
-	if jsonData == "" {
-		dataToEncrypt = []byte("[]")
-	} else {
-		// Trim single quotes for Windows compatibility
-		cleanedJSON := strings.Trim(jsonData, "'\"")
-		var inputData map[string]interface{}
-		if err := json.Unmarshal([]byte(cleanedJSON), &inputData); err != nil {
-			return fmt.Errorf("failed to parse JSON data: %v", err)
-		}
-
-		now := time.Now().UTC().Format(time.RFC3339)
-		record := Record{
-			"_id":       uuid.New().String(),
-			"createdAt": now,
-			"updatedAt": now,
-			"_version":  float64(0),
-		}
-		for k, v := range inputData {
-			if k != "_id" && k != "createdAt" && k != "updatedAt" && k != "_version" {
-				record[k] = v
-			}
-		}
-
-		dataArray := []Record{record}
-		dataToEncrypt, err = json.Marshal(dataArray)
-		if err != nil {
-			return fmt.Errorf("failed to marshal JSON data: %v", err)
-		}
-	}
-
-	encrypted, err := helper.Encrypt(dataToEncrypt, key)
-	if err != nil {
-		return fmt.Errorf("failed to encrypt data: %v", err)
-	}
-
-	if err := os.WriteFile(collectionPath, []byte(encrypted), 0600); err != nil {
-		return fmt.Errorf("failed to write collection file: %v", err)
-	}
-
-	keyPath := filepath.Join(dir, collectionName+".key")
-	if err := os.WriteFile(keyPath, key, 0600); err != nil {
-		return fmt.Errorf("failed to write key file: %v", err)
-	}
-
-	fmt.Printf("Created collection %s at %s\n", collectionName, collectionPath)
-	return nil
-}
-
-func insertRecord(collectionName, jsonData, schemaName string) error {
-	dir := filepath.Join("..", "db")
-	if schemaName != "" {
-		dir = filepath.Join("..", "db", schemaName)
-	}
-
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("failed to create directory %s: %v", dir, err)
-	}
-	if err := os.Chmod(dir, 0700); err != nil {
-		return fmt.Errorf("failed to set permissions on %s: %v", dir, err)
-	}
-
-	collectionPath := filepath.Join(dir, collectionName+".txt")
-	keyPath := filepath.Join(dir, collectionName+".key")
-
-	if _, err := os.Stat(collectionPath); os.IsNotExist(err) {
-		return addCollection(collectionName, schemaName, jsonData)
-	}
-
-	encryptedData, err := os.ReadFile(collectionPath)
-	if err != nil {
-		return fmt.Errorf("failed to read collection file: %v", err)
-	}
-
-	key, err := os.ReadFile(keyPath)
-	if err != nil {
-		return fmt.Errorf("failed to read key file: %v", err)
-	}
-
-	decrypted, err := helper.Decrypt(string(encryptedData), key)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt data: %v", err)
-	}
-
-	var records []Record
-	if err := json.Unmarshal(decrypted, &records); err != nil {
-		return fmt.Errorf("failed to parse collection JSON: %v", err)
-	}
-
-	// Trim single quotes for Windows compatibility
-	cleanedJSON := strings.Trim(jsonData, "'\"")
-	var inputData map[string]interface{}
-	if err := json.Unmarshal([]byte(cleanedJSON), &inputData); err != nil {
-		return fmt.Errorf("failed to parse JSON data: %v", err)
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	newRecord := Record{
-		"_id":       uuid.New().String(),
-		"createdAt": now,
-		"updatedAt": now,
-		"_version":  float64(0),
-	}
-	for k, v := range inputData {
-		if k != "_id" && k != "createdAt" && k != "updatedAt" && k != "_version" {
-			newRecord[k] = v
-		}
-	}
-
-	records = append(records, newRecord)
-	dataToEncrypt, err := json.Marshal(records)
-	if err != nil {
-		return fmt.Errorf("failed to marshal JSON data: %v", err)
-	}
-
-	encrypted, err := helper.Encrypt(dataToEncrypt, key)
-	if err != nil {
-		return fmt.Errorf("failed to encrypt data: %v", err)
-	}
-
-	if err := os.WriteFile(collectionPath, []byte(encrypted), 0600); err != nil {
-		return fmt.Errorf("failed to write collection file: %v", err)
-	}
-
-	fmt.Printf("Inserted record into collection %s\n", collectionName)
-	return nil
-}
-
-func readCollection(collectionName, schemaName string) error {
-	dir := filepath.Join("..", "db")
-	if schemaName != "" {
-		dir = filepath.Join("..", "db", schemaName)
-	}
-
-	collectionPath := filepath.Join(dir, collectionName+".txt")
-	keyPath := filepath.Join(dir, collectionName+".key")
-
-	encryptedData, err := os.ReadFile(collectionPath)
-	if err != nil {
-		return fmt.Errorf("failed to read collection file: %v", err)
-	}
-
-	key, err := os.ReadFile(keyPath)
-	if err != nil {
-		return fmt.Errorf("failed to read key file: %v", err)
-	}
-
-	decrypted, err := helper.Decrypt(string(encryptedData), key)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt data: %v", err)
-	}
-
-	var prettyJSON bytes.Buffer
-	if err := json.Indent(&prettyJSON, decrypted, "", "  "); err != nil {
-		return fmt.Errorf("failed to format JSON: %v", err)
-	}
-
-	fmt.Printf("Collection %s contents:\n%s\n", collectionName, prettyJSON.String())
-	return nil
-}
-
-func readCollectionAPI(collectionName, schemaName string) ([]Record, error) {
+func readCollectionAPI(collectionName, schemaName string) ([]types.Record, error) {
 	dir := filepath.Join("..", "db")
 	if schemaName != "" {
 		dir = filepath.Join("..", "db", schemaName)
@@ -287,152 +98,12 @@ func readCollectionAPI(collectionName, schemaName string) ([]Record, error) {
 		return nil, fmt.Errorf("failed to decrypt data: %v", err)
 	}
 
-	var records []Record
+	var records []types.Record
 	if err := json.Unmarshal(decrypted, &records); err != nil {
 		return nil, fmt.Errorf("failed to parse collection JSON: %v", err)
 	}
 
 	return records, nil
-}
-
-func editCollection(collectionName, id, jsonData, schemaName string) error {
-	dir := filepath.Join("..", "db")
-	if schemaName != "" {
-		dir = filepath.Join("..", "db", schemaName)
-	}
-
-	collectionPath := filepath.Join(dir, collectionName+".txt")
-	keyPath := filepath.Join(dir, collectionName+".key")
-
-	encryptedData, err := os.ReadFile(collectionPath)
-	if err != nil {
-		return fmt.Errorf("failed to read collection file: %v", err)
-	}
-
-	key, err := os.ReadFile(keyPath)
-	if err != nil {
-		return fmt.Errorf("failed to read key file: %v", err)
-	}
-
-	decrypted, err := helper.Decrypt(string(encryptedData), key)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt data: %v", err)
-	}
-
-	var records []Record
-	if err := json.Unmarshal(decrypted, &records); err != nil {
-		return fmt.Errorf("failed to parse collection JSON: %v", err)
-	}
-
-	// Trim single quotes for Windows compatibility
-	cleanedJSON := strings.Trim(jsonData, "'\"")
-	var inputData map[string]interface{}
-	if err := json.Unmarshal([]byte(cleanedJSON), &inputData); err != nil {
-		return fmt.Errorf("failed to parse JSON data: %v", err)
-	}
-
-	found := false
-	now := time.Now().UTC().Format(time.RFC3339)
-	for i, record := range records {
-		if record["_id"] == id {
-			newRecord := Record{
-				"_id":       id,
-				"createdAt": record["createdAt"],
-				"updatedAt": now,
-				"_version":  record["_version"].(float64) + 1,
-			}
-			for k, v := range inputData {
-				if k != "_id" && k != "createdAt" && k != "updatedAt" && k != "_version" {
-					newRecord[k] = v
-				}
-			}
-			records[i] = newRecord
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return fmt.Errorf("record with _id %s not found", id)
-	}
-
-	dataToEncrypt, err := json.Marshal(records)
-	if err != nil {
-		return fmt.Errorf("failed to marshal JSON data: %v", err)
-	}
-
-	encrypted, err := helper.Encrypt(dataToEncrypt, key)
-	if err != nil {
-		return fmt.Errorf("failed to encrypt data: %v", err)
-	}
-
-	if err := os.WriteFile(collectionPath, []byte(encrypted), 0600); err != nil {
-		return fmt.Errorf("failed to write collection file: %v", err)
-	}
-
-	fmt.Printf("Updated record %s in collection %s\n", id, collectionName)
-	return nil
-}
-
-func removeRecord(collectionName, id, schemaName string) error {
-	dir := filepath.Join("..", "db")
-	if schemaName != "" {
-		dir = filepath.Join("..", "db", schemaName)
-	}
-
-	collectionPath := filepath.Join(dir, collectionName+".txt")
-	keyPath := filepath.Join(dir, collectionName+".key")
-
-	encryptedData, err := os.ReadFile(collectionPath)
-	if err != nil {
-		return fmt.Errorf("failed to read collection file: %v", err)
-	}
-
-	key, err := os.ReadFile(keyPath)
-	if err != nil {
-		return fmt.Errorf("failed to read key file: %v", err)
-	}
-
-	decrypted, err := helper.Decrypt(string(encryptedData), key)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt data: %v", err)
-	}
-
-	var records []Record
-	if err := json.Unmarshal(decrypted, &records); err != nil {
-		return fmt.Errorf("failed to parse collection JSON: %v", err)
-	}
-
-	found := false
-	newRecords := []Record{}
-	for _, record := range records {
-		if record["_id"] != id {
-			newRecords = append(newRecords, record)
-		} else {
-			found = true
-		}
-	}
-
-	if !found {
-		return fmt.Errorf("record with _id %s not found", id)
-	}
-
-	dataToEncrypt, err := json.Marshal(newRecords)
-	if err != nil {
-		return fmt.Errorf("failed to marshal JSON data: %v", err)
-	}
-
-	encrypted, err := helper.Encrypt(dataToEncrypt, key)
-	if err != nil {
-		return fmt.Errorf("failed to encrypt data: %v", err)
-	}
-
-	if err := os.WriteFile(collectionPath, []byte(encrypted), 0600); err != nil {
-		return fmt.Errorf("failed to write collection file: %v", err)
-	}
-
-	fmt.Printf("Removed record %s from collection %s\n", id, collectionName)
-	return nil
 }
 
 func dropCollection(collectionName, schemaName string) error {
@@ -569,7 +240,7 @@ func runServer() {
 				return
 			}
 
-			if err := addCollection(collectionName, schemaName, body.Data); err != nil {
+			if err := controller.AddCollection(collectionName, schemaName, body.Data); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
@@ -589,7 +260,7 @@ func runServer() {
 				return
 			}
 
-			if err := insertRecord(collectionName, body.Data, schemaName); err != nil {
+			if err := controller.InsertRecord(collectionName, body.Data, schemaName); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
@@ -624,7 +295,7 @@ func runServer() {
 				return
 			}
 
-			if err := editCollection(collectionName, id, body.Data, schemaName); err != nil {
+			if err := controller.EditCollection(collectionName, id, body.Data, schemaName); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
@@ -638,7 +309,7 @@ func runServer() {
 			collectionName := c.Param("collection_name")
 			id := c.Param("id")
 
-			if err := removeRecord(collectionName, id, schemaName); err != nil {
+			if err := controller.RemoveRecord(collectionName, id, schemaName); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
@@ -710,7 +381,7 @@ func runServer() {
 			return
 		}
 
-		if err := addCollection(collectionName, schemaName, data); err != nil {
+		if err := controller.AddCollection(collectionName, schemaName, data); err != nil {
 			c.HTML(http.StatusBadRequest, "index.html", gin.H{
 				"Error":      err.Error(),
 				"SchemaName": schemaName,
@@ -749,7 +420,7 @@ func runServer() {
 			return
 		}
 
-		if err := insertRecord(collectionName, data, schemaName); err != nil {
+		if err := controller.InsertRecord(collectionName, data, schemaName); err != nil {
 			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
 				"Error":          err.Error(),
 				"SchemaName":     schemaName,
@@ -792,7 +463,7 @@ func runServer() {
 			return
 		}
 
-		if err := editCollection(collectionName, id, data, schemaName); err != nil {
+		if err := controller.EditCollection(collectionName, id, data, schemaName); err != nil {
 			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
 				"Error":          err.Error(),
 				"SchemaName":     schemaName,
@@ -834,7 +505,7 @@ func runServer() {
 			return
 		}
 
-		if err := removeRecord(collectionName, id, schemaName); err != nil {
+		if err := controller.RemoveRecord(collectionName, id, schemaName); err != nil {
 			c.HTML(http.StatusBadRequest, "collection.html", gin.H{
 				"Error":          err.Error(),
 				"SchemaName":     schemaName,
@@ -902,6 +573,7 @@ func runServer() {
 
 	// Run server
 	addr := fmt.Sprintf(":%s", config.Port)
+	fmt.Printf("Server running at http://localhost:%s\n", config.Port)
 	if err := r.Run(addr); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start server: %v\n", err)
 		os.Exit(1)
@@ -910,29 +582,29 @@ func runServer() {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: kitedb <command> [args]")
+		fmt.Println("Usage: kite <command> [args]")
 		fmt.Println("Commands:")
-		fmt.Println("  server - Start the REST API and web portal")
-		fmt.Println("  add <collection_name> [<schema_name> [<json_data>]]")
-		fmt.Println("  insert <collection_name> <json_data> [<schema_name>]")
-		fmt.Println("  read <collection_name> [<schema_name>]")
-		fmt.Println("  edit <collection_name> <id> <json_data> [<schema_name>]")
-		fmt.Println("  remove <collection_name> <id> [<schema_name>]")
-		fmt.Println("  drop <collection_name> [<schema_name>]")
+		fmt.Println("  serve - Start the REST API and web portal")
+		fmt.Println("  add <collection> [<schema> [<json_data>]]")
+		fmt.Println("  push <collection> <json_data> [<schema>]")
+		fmt.Println("  pull <collection> [<schema>]")
+		fmt.Println("  edit <collection> <id> <json_data> [<schema>]")
+		fmt.Println("  move <collection> <id> [<schema>]")
+		fmt.Println("  drop <collection> [<schema>]")
 		fmt.Println("Examples:")
-		fmt.Println("  kitedb server")
-		fmt.Println("  kitedb add users")
-		fmt.Println("  kitedb add users public '{\"name\":\"nun\", \"age\": 20}'")
-		fmt.Println("  kitedb insert users '{\"name\":\"bob\", \"level\": 5}' public")
-		fmt.Println("  kitedb read users")
-		fmt.Println("  kitedb edit users <id> '{\"name\":\"newname\", \"age\": 25}' public")
-		fmt.Println("  kitedb remove users <id>")
-		fmt.Println("  kitedb drop users public")
+		fmt.Println("  kite server")
+		fmt.Println("  kite add users")
+		fmt.Println("  kite add users public '{\"name\":\"nun\", \"age\": 20}'")
+		fmt.Println("  kite insert users '{\"name\":\"bob\", \"level\": 5}' public")
+		fmt.Println("  kite read users")
+		fmt.Println("  kite edit users <id> '{\"name\":\"newname\", \"age\": 25}' public")
+		fmt.Println("  kite remove users <id>")
+		fmt.Println("  kite drop users public")
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
-	case "server":
+	case "serve":
 		if err := ensureSchema("public"); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to ensure default schema: %v\n", err)
 			os.Exit(1)
@@ -943,7 +615,7 @@ func main() {
 		addCmd.Parse(os.Args[2:])
 		args := addCmd.Args()
 		if len(args) < 1 {
-			fmt.Println("Usage: kitedb add <collection_name> [<schema_name> [<json_data>]]")
+			fmt.Println("Usage: kite add <collection> [<schema> [<json_data>]]")
 			os.Exit(1)
 		}
 
@@ -957,16 +629,16 @@ func main() {
 			jsonData = args[2]
 		}
 
-		if err := addCollection(collectionName, schemaName, jsonData); err != nil {
+		if err := controller.AddCollection(collectionName, schemaName, jsonData); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-	case "insert":
-		insertCmd := flag.NewFlagSet("insert", flag.ExitOnError)
-		insertCmd.Parse(os.Args[2:])
-		args := insertCmd.Args()
+	case "push":
+		pushCmd := flag.NewFlagSet("push", flag.ExitOnError)
+		pushCmd.Parse(os.Args[2:])
+		args := pushCmd.Args()
 		if len(args) < 2 {
-			fmt.Println("Usage: kitedb insert <collection_name> <json_data> [<schema_name>]")
+			fmt.Println("Usage: kitedb push <collection> <json_data> [<schema>]")
 			os.Exit(1)
 		}
 
@@ -977,16 +649,16 @@ func main() {
 			schemaName = args[2]
 		}
 
-		if err := insertRecord(collectionName, jsonData, schemaName); err != nil {
+		if err := controller.InsertRecord(collectionName, jsonData, schemaName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-	case "read":
-		readCmd := flag.NewFlagSet("read", flag.ExitOnError)
-		readCmd.Parse(os.Args[2:])
-		args := readCmd.Args()
+	case "pull":
+		pullCmd := flag.NewFlagSet("pull", flag.ExitOnError)
+		pullCmd.Parse(os.Args[2:])
+		args := pullCmd.Args()
 		if len(args) < 1 {
-			fmt.Println("Usage: kitedb read <collection_name> [<schema_name>]")
+			fmt.Println("Usage: kitedb pull <collection_name> [<schema_name>]")
 			os.Exit(1)
 		}
 
@@ -996,7 +668,7 @@ func main() {
 			schemaName = args[1]
 		}
 
-		if err := readCollection(collectionName, schemaName); err != nil {
+		if err := controller.ReadCollection(collectionName, schemaName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1005,7 +677,7 @@ func main() {
 		editCmd.Parse(os.Args[2:])
 		args := editCmd.Args()
 		if len(args) < 2 {
-			fmt.Println("Usage: kitedb edit <collection_name> <id> <json_data> [<schema_name>]")
+			fmt.Println("Usage: kite edit <collection> <id> <json_data> [<schema>]")
 			os.Exit(1)
 		}
 
@@ -1017,16 +689,16 @@ func main() {
 			schemaName = args[3]
 		}
 
-		if err := editCollection(collectionName, id, jsonData, schemaName); err != nil {
+		if err := controller.EditCollection(collectionName, id, jsonData, schemaName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-	case "remove":
-		removeCmd := flag.NewFlagSet("remove", flag.ExitOnError)
-		removeCmd.Parse(os.Args[2:])
-		args := removeCmd.Args()
+	case "move":
+		moveCmd := flag.NewFlagSet("move", flag.ExitOnError)
+		moveCmd.Parse(os.Args[2:])
+		args := moveCmd.Args()
 		if len(args) < 2 {
-			fmt.Println("Usage: kitedb remove <collection_name> <id> [<schema_name>]")
+			fmt.Println("Usage: kite move <collection> <id> [<schema>]")
 			os.Exit(1)
 		}
 
@@ -1037,7 +709,7 @@ func main() {
 			schemaName = args[2]
 		}
 
-		if err := removeRecord(collectionName, id, schemaName); err != nil {
+		if err := controller.RemoveRecord(collectionName, id, schemaName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1046,7 +718,7 @@ func main() {
 		dropCmd.Parse(os.Args[2:])
 		args := dropCmd.Args()
 		if len(args) < 1 {
-			fmt.Println("Usage: kitedb drop <collection_name> [<schema_name>]")
+			fmt.Println("Usage: kite drop <collection> [<schema>]")
 			os.Exit(1)
 		}
 
@@ -1062,15 +734,15 @@ func main() {
 		}
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
-		fmt.Println("Usage: kitedb <command> [args]")
+		fmt.Println("Usage: kite <command> [args]")
 		fmt.Println("Commands:")
-		fmt.Println("  server - Start the REST API and web portal")
-		fmt.Println("  add <collection_name> [<schema_name> [<json_data>]]")
-		fmt.Println("  insert <collection_name> <json_data> [<schema_name>]")
-		fmt.Println("  read <collection_name> [<schema_name>]")
-		fmt.Println("  edit <collection_name> <id> <json_data> [<schema_name>]")
-		fmt.Println("  remove <collection_name> <id> [<schema_name>]")
-		fmt.Println("  drop <collection_name> [<schema_name>]")
+		fmt.Println("  serve - Start the REST API and web portal")
+		fmt.Println("  add <collection> [<schema> [<json_data>]]")
+		fmt.Println("  push <collection> <json_data> [<schema>]")
+		fmt.Println("  pull <collection> [<schema>]")
+		fmt.Println("  edit <collection> <id> <json_data> [<schema>]")
+		fmt.Println("  move <collection> <id> [<schema>]")
+		fmt.Println("  drop <collection> [<schema>]")
 		os.Exit(1)
 	}
 }

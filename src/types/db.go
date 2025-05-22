@@ -1,5 +1,7 @@
 package types
 
+type Record map[string]interface{}
+
 type DBConfig struct {
 	Username   string `json:"username"`
 	Password   string `json:"password"`
